@@ -1,0 +1,12 @@
+[package]
+name = "cer"
+version = "0.1.0"
+edition = "2021"
+description = "Run a command with another process's environment variables"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
