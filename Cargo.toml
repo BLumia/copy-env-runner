@@ -1,8 +1,15 @@
 [package]
-name = "cer"
+name = "copy-env-runner"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Run a command with another process's environment variables"
+readme = "README.md"
+repository = "https://github.com/BLumia/copy-env-runner"
+
+[[bin]]
+name = "cer"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
