@@ -1,6 +1,6 @@
 [package]
 name = "copy-env-runner"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Run a command with another process's environment variables"
