@@ -2,24 +2,28 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{ExitCode, Output};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "cer", version, about = "Run a command with another process's environment variables")]
-#[command(group = clap::ArgGroup::new("pid_source").required(true).args(["pid", "pname"]))]
+#[command(group = clap::ArgGroup::new("env_source").required(true).args(["pid", "pname", "systemd"]))]
 struct Cli {
     /// Target command to execute
     target: String,
 
     /// Reference process PID
-    #[arg(long, group = "pid_source")]
+    #[arg(long, group = "env_source")]
     pid: Option<u32>,
 
     /// Process name to find reference PID
-    #[arg(long, group = "pid_source")]
+    #[arg(long, group = "env_source")]
     pname: Option<String>,
+
+    /// Use systemd environment variables (default: user)
+    #[arg(long, group = "env_source", num_args = 0..=1, default_missing_value = "user")]
+    systemd: Option<SystemdScope>,
 
     /// Remove environment variable (can be used multiple times)
     #[arg(long)]
@@ -40,6 +44,58 @@ struct Cli {
     /// Arguments passed to the target command
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     target_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum SystemdScope {
+    User,
+    System,
+}
+
+fn read_systemd_envs(scope: &SystemdScope) -> Result<HashMap<String, String>, String> {
+    let mut cmd = std::process::Command::new("systemctl");
+    if *scope == SystemdScope::User {
+        cmd.arg("--user");
+    }
+    cmd.arg("show-environment");
+
+    let Output { status, stdout, stderr } = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "systemctl not found".to_string()
+        } else {
+            format!("Failed to run systemctl: {}", e)
+        }
+    })?;
+
+    if !status.success() {
+        let stderr_str = String::from_utf8_lossy(&stderr);
+        let hint = if stderr_str.contains("Failed to connect to bus") {
+            "\nHint: Ensure DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR is set for --user scope."
+        } else if stderr_str.contains("not running") {
+            "\nHint: systemd does not appear to be running."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "systemctl show-environment failed: {}{}",
+            stderr_str.trim(),
+            hint
+        ));
+    }
+
+    let mut envs = HashMap::new();
+    let output = String::from_utf8(stdout)
+        .map_err(|e| format!("Invalid UTF-8 from systemctl output: {}", e))?;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            envs.insert(key.to_string(), value.to_string());
+        }
+    }
+    Ok(envs)
 }
 
 fn read_environ(pid: u32) -> Result<HashMap<String, String>, String> {
@@ -74,30 +130,24 @@ fn parse_set_env(spec: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("Invalid --set-env format (missing '='): {}", spec))
 }
 
-fn resolve_pid(cli: &Cli) -> Result<u32, String> {
-    if let Some(pid) = cli.pid {
-        return Ok(pid);
-    }
-    if let Some(ref pname) = cli.pname {
-        let entries = fs::read_dir("/proc").map_err(|e| format!("Failed to read /proc: {}", e))?;
-        for entry in entries.flatten() {
-            let comm_path = entry.path().join("comm");
-            if !comm_path.exists() {
-                continue;
-            }
-            if let Ok(name) = fs::read_to_string(&comm_path) {
-                if name.trim() == pname {
-                    if let Some(pid_str) = entry.file_name().to_str() {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
-                            return Ok(pid);
-                        }
+fn resolve_pname(pname: &str) -> Result<u32, String> {
+    let entries = fs::read_dir("/proc").map_err(|e| format!("Failed to read /proc: {}", e))?;
+    for entry in entries.flatten() {
+        let comm_path = entry.path().join("comm");
+        if !comm_path.exists() {
+            continue;
+        }
+        if let Ok(name) = fs::read_to_string(&comm_path) {
+            if name.trim() == pname {
+                if let Some(pid_str) = entry.file_name().to_str() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        return Ok(pid);
                     }
                 }
             }
         }
-        return Err(format!("No process found with name '{}'", pname));
     }
-    unreachable!()
+    Err(format!("No process found with name '{}'", pname))
 }
 
 fn build_final_envs(cli: &Cli, base_envs: HashMap<String, String>) -> Result<HashMap<String, String>, String> {
@@ -142,23 +192,46 @@ fn resolve_command(target: &str, envs: &HashMap<String, String>) -> Option<std::
     None
 }
 
+enum EnvSource {
+    Pid(u32),
+    Systemd(SystemdScope),
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let pid = match resolve_pid(&cli) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return ExitCode::from(1);
-        }
+    let env_source = if cli.pid.is_some() {
+        EnvSource::Pid(cli.pid.unwrap())
+    } else if cli.pname.is_some() {
+        let pid = match resolve_pname(cli.pname.as_ref().unwrap()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return ExitCode::from(1);
+            }
+        };
+        EnvSource::Pid(pid)
+    } else if let Some(ref scope) = cli.systemd {
+        EnvSource::Systemd(scope.clone())
+    } else {
+        unreachable!()
     };
 
-    let base_envs = match read_environ(pid) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return ExitCode::from(2);
-        }
+    let base_envs = match env_source {
+        EnvSource::Pid(pid) => match read_environ(pid) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        EnvSource::Systemd(ref scope) => match read_systemd_envs(scope) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return ExitCode::from(2);
+            }
+        },
     };
 
     let final_envs = match build_final_envs(&cli, base_envs) {
@@ -241,6 +314,7 @@ mod tests {
             target: "cmd".to_string(),
             pid: Some(1),
             pname: None,
+            systemd: None,
             unset_env: vec!["PATH".to_string()],
             unset_envs: None,
             set_env: vec![],
@@ -264,6 +338,7 @@ mod tests {
             target: "cmd".to_string(),
             pid: Some(1),
             pname: None,
+            systemd: None,
             unset_env: vec!["HOME".to_string()],
             unset_envs: Some("PATH:LANG".to_string()),
             set_env: vec![],
@@ -285,6 +360,7 @@ mod tests {
             target: "cmd".to_string(),
             pid: Some(1),
             pname: None,
+            systemd: None,
             unset_env: vec![],
             unset_envs: None,
             set_env: vec!["PATH=/custom/bin".to_string(), "MY_VAR=hello".to_string()],
@@ -304,6 +380,7 @@ mod tests {
             target: "cmd".to_string(),
             pid: Some(1),
             pname: None,
+            systemd: None,
             unset_env: vec![],
             unset_envs: None,
             set_env: vec!["INVALID_NO_EQUALS".to_string()],
@@ -324,6 +401,7 @@ mod tests {
             target: "cmd".to_string(),
             pid: Some(1),
             pname: None,
+            systemd: None,
             unset_env: vec!["HOME".to_string()],
             unset_envs: None,
             set_env: vec!["PATH=/custom".to_string()],
@@ -347,5 +425,44 @@ mod tests {
         let result = read_environ(999999999);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_parse_systemd_output() {
+        let output = "PATH=/usr/local/bin:/usr/bin\nHOME=/home/user\nLANG=en_US.UTF-8\n";
+        let mut envs = HashMap::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                envs.insert(key.to_string(), value.to_string());
+            }
+        }
+        assert_eq!(envs.len(), 3);
+        assert_eq!(envs["PATH"], "/usr/local/bin:/usr/bin");
+        assert_eq!(envs["HOME"], "/home/user");
+        assert_eq!(envs["LANG"], "en_US.UTF-8");
+    }
+
+    #[test]
+    fn test_read_systemd_envs_user() {
+        let result = read_systemd_envs(&SystemdScope::User);
+        if result.is_err() {
+            return;
+        }
+        let envs = result.unwrap();
+        assert!(!envs.is_empty());
+    }
+
+    #[test]
+    fn test_read_systemd_envs_system() {
+        let result = read_systemd_envs(&SystemdScope::System);
+        if result.is_err() {
+            return;
+        }
+        let envs = result.unwrap();
+        assert!(!envs.is_empty());
     }
 }
