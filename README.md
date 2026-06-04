@@ -13,7 +13,7 @@ This tool also allows user to override environment variables or remove environme
 ```plain
 Run a command with another process's environment variables
 
-Usage: cer [OPTIONS] <--pid <PID>|--pname <PNAME>|--systemd [<SYSTEMD>]> <TARGET> [TARGET_ARGS]...
+Usage: cer [OPTIONS] <TARGET> [TARGET_ARGS]...
 
 Arguments:
   <TARGET>          Target command to execute
@@ -22,7 +22,7 @@ Arguments:
 Options:
       --pid <PID>                Reference process PID
       --pname <PNAME>            Process name to find reference PID
-      --systemd [<SYSTEMD>]      Use systemd environment variables (default: user) [possible values: user, system]
+      --systemd <SYSTEMD>        Use systemd environment variables (user or system) [possible values: user, system]
       --unset-env <UNSET_ENV>    Remove environment variable (can be used multiple times)
       --unset-envs <UNSET_ENVS>  Remove environment variables separated by ':' (e.g., ENV1:ENV2:ENV3)
       --set-env <SET_ENV>        Set/override environment variable as KEY=VALUE (can be used multiple times)
@@ -42,7 +42,9 @@ $ cer --pname dde-shell nm-applet --set-env="GDK_BACKEND=x11"
 Run `nm-applet` with current systemd user environ, with `GDK_BACKEND` set to `x11`.
 
 ```shell
-$ cer --systemd nm-applet --set-env="GDK_BACKEND=x11"
+$ cer --systemd user nm-applet --set-env="GDK_BACKEND=x11"
+# "--systemd user" is the default behavior, so you can omit it as well
+$ cer nm-applet --set-env="GDK_BACKEND=x11"
 ```
 
 ## Installation
