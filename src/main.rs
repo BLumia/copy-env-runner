@@ -8,7 +8,7 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "cer", version, about = "Run a command with another process's environment variables")]
-#[command(group = clap::ArgGroup::new("env_source").required(true).args(["pid", "pname", "systemd"]))]
+#[command(group = clap::ArgGroup::new("env_source").args(["pid", "pname", "systemd"]))]
 struct Cli {
     /// Target command to execute
     target: String,
@@ -21,8 +21,8 @@ struct Cli {
     #[arg(long, group = "env_source")]
     pname: Option<String>,
 
-    /// Use systemd environment variables (default: user)
-    #[arg(long, group = "env_source", num_args = 0..=1, default_missing_value = "user")]
+    /// Use systemd environment variables (user or system)
+    #[arg(long, group = "env_source")]
     systemd: Option<SystemdScope>,
 
     /// Remove environment variable (can be used multiple times)
@@ -214,7 +214,7 @@ fn main() -> ExitCode {
     } else if let Some(ref scope) = cli.systemd {
         EnvSource::Systemd(scope.clone())
     } else {
-        unreachable!()
+        EnvSource::Systemd(SystemdScope::User)
     };
 
     let base_envs = match env_source {
@@ -464,5 +464,39 @@ mod tests {
         }
         let envs = result.unwrap();
         assert!(!envs.is_empty());
+    }
+
+    #[test]
+    fn test_cli_no_source_defaults_to_systemd_user() {
+        let cli = Cli::try_parse_from(["cer", "/bin/echo", "hello"]).unwrap();
+        assert!(cli.pid.is_none());
+        assert!(cli.pname.is_none());
+        assert!(cli.systemd.is_none());
+        assert_eq!(cli.target, "/bin/echo");
+        assert_eq!(cli.target_args, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_cli_systemd_requires_value() {
+        let result = Cli::try_parse_from(["cer", "--systemd", "/bin/echo"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_systemd_with_value() {
+        let cli = Cli::try_parse_from(["cer", "--systemd", "user", "/bin/echo", "hello"]).unwrap();
+        assert_eq!(cli.systemd, Some(SystemdScope::User));
+    }
+
+    #[test]
+    fn test_cli_systemd_system() {
+        let cli = Cli::try_parse_from(["cer", "--systemd=system", "/bin/echo"]).unwrap();
+        assert_eq!(cli.systemd, Some(SystemdScope::System));
+    }
+
+    #[test]
+    fn test_cli_pid_and_systemd_mutual_exclusive() {
+        let result = Cli::try_parse_from(["cer", "--pid", "1", "--systemd", "user", "/bin/echo"]);
+        assert!(result.is_err());
     }
 }
